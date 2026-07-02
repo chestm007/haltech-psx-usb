@@ -380,11 +380,17 @@ def summarize_len_prefixed_records(body: bytes) -> str:
 
 
 def detect_repeating_family_cycles(families: list[str], width: int = 5, limit: int = 3) -> list[tuple[int, int, list[str]]]:
+    if width < 1:
+        return []
+
     best_by_window: dict[tuple[str, ...], tuple[int, int]] = {}
     for start in range(len(families) - width * 2 + 1):
         window = tuple(families[start : start + width])
-        if not (window[0].startswith("04") and window[1] == "2401" and window[2] == "2402" and window[3].startswith("05") and window[4] == "2501"):
+        if len(window) < width:
             continue
+        if width == 5:
+            if not (window[0].startswith("04") and window[1] == "2401" and window[2] == "2402" and window[3].startswith("05") and window[4] == "2501"):
+                continue
         count = 0
         i = start
         while i + width <= len(families) and tuple(families[i : i + width]) == window:
@@ -406,23 +412,79 @@ def summarize_0x09_payload(payload: bytes) -> str:
         records = split_len_prefixed_records(body)
         families = [f"{rec[1]:02X}{rec[2]:02X}" for rec in records if len(rec) >= 3]
         summary = summarize_len_prefixed_records(body)
-        cycles = detect_repeating_family_cycles(families, width=5, limit=3)
-        for count, start, window in cycles:
-            summary += f" cycle={' '.join(window)} x{count}@{start}"
+        best = detect_best_09_cycle(payload)
+        if best is not None:
+            _, (count, start, window), width = best
+            shape = "matrix5" if width == 5 else "cycle3" if width == 3 else f"cycle{width}"
+            summary += f" shape={shape} cycle={' '.join(window)} x{count}@{start}"
+        else:
+            cycles = detect_repeating_family_cycles(families, width=5, limit=3)
+            for count, start, window in cycles:
+                summary += f" cycle={' '.join(window)} x{count}@{start}"
+        if families and families[0] == "0B00":
+            summary += " kind=page_transfer"
+        if families[:4] == ["0400", "2101", "0581", "0501"] or families[:4] == ["0400", "2111", "0581", "0501"]:
+            summary += " kind=setup_burst"
+        if families and set(families) <= {"0400", "0581"}:
+            summary += " kind=setup_toggle"
         return summary
     except Exception as exc:
         return f"decode_error={exc}"
 
 
-def detect_best_09_cycle(payload: bytes) -> tuple[list[bytes], tuple[int, int, list[str]]] | None:
+def detect_best_09_cycle(payload: bytes) -> tuple[list[bytes], tuple[int, int, list[str]], int] | None:
     if len(payload) < 10 or payload[0] != 0x09:
         return None
     records = split_len_prefixed_records(payload[9:])
     families = [f"{rec[1]:02X}{rec[2]:02X}" for rec in records if len(rec) >= 3]
-    cycles = detect_repeating_family_cycles(families, width=5, limit=1)
-    if not cycles:
+
+    candidates: list[tuple[list[bytes], tuple[int, int, list[str]], int]] = []
+    for width in (5, 3):
+        cycles = detect_repeating_family_cycles(families, width=width, limit=1)
+        if cycles:
+            candidates.append((records, cycles[0], width))
+
+    if not candidates:
         return None
-    return records, cycles[0]
+
+    return max(candidates, key=lambda item: (item[1][0] * item[2], item[1][0], item[2]))
+
+
+def guess_09_cycle_role(slot: int, width: int) -> str:
+    if width == 5:
+        return {
+            0: "row_header",
+            1: "row_meta",
+            2: "axis_payload",
+            3: "value_payload",
+            4: "trailer",
+        }.get(slot, "unknown")
+    if width == 3:
+        return {
+            0: "row_header",
+            1: "payload_a",
+            2: "payload_b",
+        }.get(slot, "unknown")
+    return f"slot_{slot}"
+
+
+def extract_09_cycle_fields(slot: int, rec: bytes, width: int) -> tuple[str, ...]:
+    if width == 5:
+        row_index = f"{rec[3]:02X}" if slot == 0 and len(rec) >= 4 else ""
+        row_meta = f"{rec[3]:02X}" if slot == 1 and len(rec) >= 4 else ""
+        axis_value = f"{rec[5]:02X}" if slot == 2 and len(rec) >= 6 else ""
+        value_raw = f"{rec[4]:02X}" if slot == 3 and len(rec) >= 5 else ""
+        value_flag = f"{rec[5]:02X}" if slot == 3 and len(rec) >= 6 else ""
+        return row_index, row_meta, axis_value, value_raw, value_flag
+
+    if width == 3:
+        row_index = f"{rec[3]:02X}" if slot == 0 and len(rec) >= 4 else ""
+        field_a = f"{rec[3]:02X}" if len(rec) >= 4 else ""
+        field_b = f"{rec[4]:02X}" if len(rec) >= 5 else ""
+        field_c = f"{rec[5]:02X}" if len(rec) >= 6 else ""
+        return row_index, field_a, field_b, field_c
+
+    return tuple()
 
 
 def format_09_cycle_csv(packet_index: int, payload: bytes) -> str:
@@ -430,14 +492,29 @@ def format_09_cycle_csv(packet_index: int, payload: bytes) -> str:
     if best is None:
         return ""
 
-    records, (count, start, window) = best
+    records, (count, start, window), width = best
     rows: list[str] = []
-    rows.append("packet_index,occ,slot,family,length,hex")
+    if width == 5:
+        rows.append("packet_index,occ,slot,role_guess,family,length,row_index,row_meta,axis_value,value_raw,value_flag,hex")
+    else:
+        rows.append("packet_index,occ,slot,role_guess,family,length,row_index,field_a,field_b,field_c,hex")
     for occ in range(count):
         base = start + occ * len(window)
         for slot, fam in enumerate(window):
             rec = records[base + slot]
-            rows.append(f"{packet_index},{occ},{slot},{fam},{len(rec):02X},{hx(rec)}")
+            fields = extract_09_cycle_fields(slot, rec, width)
+            if width == 5:
+                row_index, row_meta, axis_value, value_raw, value_flag = fields
+                rows.append(
+                    f"{packet_index},{occ},{slot},{guess_09_cycle_role(slot, width)},{fam},{len(rec):02X},"
+                    f"{row_index},{row_meta},{axis_value},{value_raw},{value_flag},{hx(rec)}"
+                )
+            else:
+                row_index, field_a, field_b, field_c = fields
+                rows.append(
+                    f"{packet_index},{occ},{slot},{guess_09_cycle_role(slot, width)},{fam},{len(rec):02X},"
+                    f"{row_index},{field_a},{field_b},{field_c},{hx(rec)}"
+                )
     return "\n".join(rows)
 
 
@@ -446,17 +523,33 @@ def format_09_cycle_table(packet_index: int, payload: bytes) -> str:
     if best is None:
         return "(no repeating 0x09 cycle found)"
 
-    records, (count, start, window) = best
+    records, (count, start, window), width = best
     rows: list[str] = []
-    rows.append(f"packet {packet_index:05d} 0x09 cycle {' '.join(window)} x{count} start={start}")
-    rows.append("| occ | slot | family | len | hex |")
-    rows.append("| --- | --- | --- | ---: | --- |")
+    rows.append(f"packet {packet_index:05d} 0x09 cycle {' '.join(window)} x{count} start={start} width={width}")
+    if width == 5:
+        rows.append("| occ | slot | role | family | len | row | meta | axis | value | flag | hex |")
+        rows.append("| --- | --- | --- | --- | ---: | --- | --- | --- | --- | --- | --- |")
+    else:
+        rows.append("| occ | slot | role | family | len | row | a | b | c | hex |")
+        rows.append("| --- | --- | --- | --- | ---: | --- | --- | --- | --- | --- |")
 
     for occ in range(count):
         base = start + occ * len(window)
         for slot, fam in enumerate(window):
             rec = records[base + slot]
-            rows.append(f"| {occ} | {slot} | {fam} | {len(rec):02X} | {hx(rec)} |")
+            fields = extract_09_cycle_fields(slot, rec, width)
+            if width == 5:
+                row_index, row_meta, axis_value, value_raw, value_flag = fields
+                rows.append(
+                    f"| {occ} | {slot} | {guess_09_cycle_role(slot, width)} | {fam} | {len(rec):02X} | "
+                    f"{row_index} | {row_meta} | {axis_value} | {value_raw} | {value_flag} | {hx(rec)} |"
+                )
+            else:
+                row_index, field_a, field_b, field_c = fields
+                rows.append(
+                    f"| {occ} | {slot} | {guess_09_cycle_role(slot, width)} | {fam} | {len(rec):02X} | "
+                    f"{row_index} | {field_a} | {field_b} | {field_c} | {hx(rec)} |"
+                )
     return "\n".join(rows)
 
 

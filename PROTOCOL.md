@@ -5,7 +5,14 @@ Anything that needs a running car or ECU Manager GUI cross-check belongs in `CAR
 
 ## What is confirmed
 
-- ECU Manager is a .NET assembly.
+- ECU Manager is packaged inside the MSI as a .NET assembly named `ECUManagerEXE`, with companion display DLLs such as `ListDisplayDLL`, `TextViewDLL`, `Map3DDLL`, `ReferenceDLL`, and `TraceDLL`.
+- The display code exposes `com.Haltech.GenericLibrary.DisplaySupport.TableControls` plus per-view controls like `ColumnInfoControl`, `RowInfoControl`, `TableAxisModel`, `DataGridView`, and `channelSelector` / `settingChannelSelector` UI names.
+- `TextViewDLL` and `Map3DDLL` both expose `TableAxisModel` with axis-related members such as `get_AxisName`, `set_AxisName`, `get_AxisColor`, `set_AxisColor`, and `get_HideAxis`.
+- `TextViewDLL` also exposes `SettingsDataGrid` methods `SetupRowChannelUnitInfo`, `SetupColumnChannelUnitInfo`, `SetupTableHeaders`, `SetupAxisInfo`, `OnRowChannelChanged`, `OnColumnChannelChanged`, `OnFeedbackChannelChanged`, `OnFeedbackUnitsChanged`, `GetChannelName`, `GetChannelShortName`, `m_settingsGrid_SelectionChanged`, and `m_table_SelectionChanged`.
+- `TextViewDLL`’s table model also carries `m_rawRowValues`, `m_rawColumnValues`, `m_displayRowValues`, `m_displayColumnValues`, `m_normalisedRowValues`, `m_normalisedColumnValues`, `m_percentageRowValues`, `m_percentageColumnValues`, `m_columnZeroPoints`, and `FindColumnZeroPoints`, which is the strongest hint yet that the downloaded tune is being rendered as a row/column value grid rather than a flat list.
+- `inspect-pcapng --cmds 0x09 --table --csv` now emits a tentative `role_guess` column (`row_marker`, `table_meta`, `axis_payload`, `aux_payload`, `trailer`) plus parsed `row_index`, `group_index`, `row_in_group`, `axis_value`, `aux_code`, and `aux_state` fields to make the repeated 5-record unit easier to eyeball in spreadsheets; these are heuristics, not confirmed semantics.
+- The same cycle detector now also handles a second 0x09 shape: packet 378 is a 3-wide repeat (`0401` / `0583` / `0503`) after a short lead-in, which was previously invisible because the helper assumed width 5. Other 0x09 packets look like setup/control bursts rather than matrix payloads: examples include packets 333/339/386/408/414 with `0400` + `210x` + `058x`/`050x` sequences, and packets 434/440/446 with a short `0400`/`0581` toggle pair. The current taxonomy is `matrix5`, `cycle3`, `setup_burst`, and `setup_toggle`.
+- That makes `TableAxisModel` and `SettingsDataGrid` the highest-value next targets for mapping the 0x09 row stream onto ECU Manager’s row/column/channel semantics.
 - The transport code lives under `com.Haltech.ECUManager.Core.SerialComs`.
 - The connected hardware exposes a CP210x USB-to-serial bridge:
   - vendor/product: `10c4:ea60`
