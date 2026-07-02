@@ -136,18 +136,37 @@ def open_serial(port: str, baud: int):
     return ser
 
 
-def read_reply(ser, max_bytes: int = 256) -> bytes:
-    buf = bytearray()
-    while len(buf) < max_bytes:
-        chunk = ser.read(1)
-        if not chunk:
-            break
-        buf.extend(chunk)
-        # Heuristic: most responses in the live capture are short and
-        # end with checksum + FF FF sync/idle bytes.
-        if len(buf) >= 3 and buf[-2:] == b"\xff\xff":
-            break
-    return bytes(buf)
+def read_reply(ser, max_bytes: int = 1024) -> bytes:
+    """Read one length-prefixed frame.
+
+    The observed frames use byte 2 as a payload byte count, so the full frame
+    length is 3 + payload_len + 1 checksum bytes.
+    """
+    head = ser.read(3)
+    if len(head) < 3:
+        return bytes(head)
+    payload_len = head[2]
+    tail = ser.read(payload_len + 1)
+    return bytes(head + tail)
+
+
+def describe_frame(data: bytes) -> str:
+    if len(data) < 4:
+        return hx(data)
+    cmd = data[0]
+    req = data[1]
+    payload_len = data[2]
+    payload = data[3:-1]
+    checksum = data[-1]
+    parts = [f"cmd=0x{cmd:02X}", f"req=0x{req:02X}", f"len={payload_len}", f"checksum=0x{checksum:02X}"]
+    if len(payload) == payload_len and payload_len:
+        parts.append(f"payload={hx(payload)}")
+        if payload_len % 2 == 0:
+            try:
+                parts.append("words=" + " ".join(f"{w:04X}" for w in words_from_bytes(payload)))
+            except Exception:
+                pass
+    return " ".join(parts)
 
 
 def cmd_send(args: argparse.Namespace) -> int:
@@ -180,6 +199,7 @@ def cmd_send(args: argparse.Namespace) -> int:
         ser.flush()
         reply = read_reply(ser)
         print(f"RX {hx(reply)}")
+        print(f"RXD {describe_frame(reply)}")
     finally:
         ser.close()
     return 0
@@ -221,7 +241,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("send", help="send a frame to a serial port")
     s.add_argument("--port", required=True, help="serial port, e.g. COM4 or /dev/ttyUSB0")
-    s.add_argument("--baud", type=int, required=True, help="baud rate (not yet confirmed; user supplies)")
+    s.add_argument("--baud", type=int, default=57600, help="baud rate (defaults to confirmed 57600)")
     s.add_argument("--hex-only", action="store_true", help="build TX and stop before opening serial")
     s.add_argument("kind", choices=["data", "get-dtcs", "eeprom-ranges", "data-log-status", "raw"], help="frame type")
     s.add_argument("--group", type=lambda s: int(s, 0), help="live 0x0B group id, e.g. 0x72")

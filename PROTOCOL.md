@@ -23,6 +23,7 @@ Status: static reverse engineering in progress.
 - `ProcessSyncBytes()` treats `0xFF` specially.
 - `WriteSyncBytes()` emits an 8-byte sync block.
 - Many response validators use an 8-bit additive checksum: last byte equals the sum of earlier bytes modulo 256.
+- Serial baud is now confirmed live at `57600` on this setup.
 - Live USB capture on the host shows the CP210x bridge at bus 3, device address 4 while ECU Manager talks to the ECU.
 - On connect, ECU Manager immediately starts a burst of proprietary `0x0B`/`0x0C` request frames, then settles into a repeating poll/download pattern.
 - In the live capture, the dominant application bytes are `0x0B` (by far the most common), then `0x0C`, then `0x33`; `0xFF`-only transfers also appear frequently as control/empty/status traffic.
@@ -49,7 +50,7 @@ The binary decodes this one down to a 3-byte frame:
 Live-capture example:
 
 - request: `33 77 AA`
-- response: `33 77 ...`
+- response: `33 77 11 02 00 03 88 02 00 07 00 00 00 00 00 00 10 00 10 71`
 
 This is the startup/status probe we saw alongside the `0x0B` live-data bursts.
 
@@ -68,19 +69,22 @@ Representative request groups from the capture:
 - `0B 72 40 ...`
   - 32 selectors
   - ids: `0080 0081 0084 0085 0087 008A 008B 008C 00A4 00E1 00E4 00E5 00E6 00EC 00F2 012F 0130 0180 0181 0182 0183 0184 0186 0189 018A 018C 0195 0197 01AF 01DF 01E1 01E2`
-  - response mirrors the header and returns 32 big-endian 16-bit values in the same slots
+  - response example: `0B 77 40 22 60 00 C8 00 00 04 EE 02 8C 00 28 00 00 00 0F 00 00 00 00 0B A5 0E 93 FF FF 18 2B 00 00 00 00 00 00 00 00 09 F4 03 AF 2E 8D 00 00 00 00 09 F5 00 00 FF FF 00 00 09 F4 00 00 00 01 00 00 00 00 B9`
 
 - `0B 73 3E ...`
   - 31 selectors
   - ids: `0201 0202 022B 0240 0241 0242 0280 0281 0282 0283 0284 0285 0286 0287 0288 0289 0294 0295 0296 02E0 02E1 02E2 02F8 02F9 02FA 0442 0443 0444 0445 0446 0447`
+  - live response shows many zeros plus `03FE 03FD 0345 00CE 006E` and trailing `03E8 03E8 0096`
 
 - `0B 74 40 ...`
   - 32 selectors
   - ids: `0448 0449 044A 044E 044F 0450 0451 0452 0453 0472 0473 0474 0475 0476 0477 0478 0479 047A 047E 047F 0480 0481 0482 0483 04D8 04D9 04DA 04DB 04DC 04DD 04DE 04DF`
+  - live response shows mostly zeros with three non-zero values: `001E 0050 0050 0064`
 
 - `0B 75 18 ...`
   - 12 selectors
   - ids: `04E0 04E4 04E5 04E6 04E7 04E8 04E9 054B 054C 054D 05B5 05B6`
+  - live response is all zeros for the current ECU state
 
 These are the live ECU data blocks the GUI polls after connect.
 
