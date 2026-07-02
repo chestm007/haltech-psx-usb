@@ -29,6 +29,8 @@ Anything that needs a running car or ECU Manager GUI cross-check belongs in `CAR
 - On connect, ECU Manager immediately starts a burst of proprietary `0x0B`/`0x0C` request frames, then settles into a repeating poll/download pattern.
 - In the live capture, the dominant application bytes are `0x0B` (by far the most common), then `0x0C`, then `0x33`; `0xFF`-only transfers also appear frequently as control/empty/status traffic.
 - The startup/download phase contains repeated `0x0B 0x72`/`0x0B 0x73`/`0x0B 0x74`/`0x0B 0x75` style frames carrying large selector tables and ECU data blocks, with responses mirroring the request id in the second byte.
+- In the saved `haltech_usb_capture.pcapng`, those selector blocks recur under incrementing request ids rather than a single fixed id, so the request id is a poll token, not a stable channel identifier.
+- ECU Manager likely downloads the whole tune from the ECU after connect, before the live-data stream settles in; if we get another packet capture, look for a distinct tune-transfer phase ahead of the repeated `0x0B` polls.
 - `haltech_poc.py` has a `live` mode that polls the ECU and prints selector/value rows, with an optional JSON label map for correlation work.
 
 ## Live-decoded payload shapes
@@ -93,6 +95,25 @@ Two short forms are confirmed in the trace:
 - `0C <req> 06 05 00 00 00 00 <checksum>`
   - response: `0C <req> 02 05 FE <checksum> FF FF`
   - this matches `EEPROMRangesChangedRequest` when its range/address fields are zeroed
+
+### `0x09` tune/page-transfer bursts
+
+This family shows up in the early connect burst and again in a later burst near the end of the saved capture.
+The framing is consistent enough to summarize even though the payload structure is still only partially understood:
+
+- small request frames begin with `09 02 ...`
+- the third byte varies by request and appears to act like a page/tune transfer selector
+- examples from the capture:
+  - `09 02 79 03 06 01 00 80 FA` -> 889-byte follow-up frame
+  - `09 02 23 0E 08 01 04 80 32` -> 3619-byte follow-up frame
+  - `09 02 42 00 02 01 01 80 32` -> 66-byte follow-up frame
+- the large follow-up payloads are not selector/value blocks; they look like tune/page data or control records instead
+- use `inspect-pcapng --cmds 0x09` to summarize these bursts from the saved capture
+- use `inspect-pcapng --cmds 0x09 --table --packet-index 327` to emit the repeated 5-record unit as a spreadsheet-friendly table for ECU Manager cross-reference
+- use `inspect-pcapng --cmds 0x09 --table --csv --packet-index 327` to emit the same data as CSV
+- the big follow-up bodies are length-prefixed record streams: each record starts with a one-byte length, and the dominant record families are `24xx`, `25xx`, `04xx`, `05xx`, `0Bxx`, and `21xx`
+- the 889-byte example splits into 57 records exactly; the 3619-byte example splits into 378 records exactly
+- the 3619-byte example contains a long repeated 5-record unit near the back half; the current best summaries are `0405 2401 2402 0506 2501`, `0404 2401 2402 0505 2501`, and `0406 2401 2402 0508 2501`
 
 ## Command IDs confirmed from request constructors
 

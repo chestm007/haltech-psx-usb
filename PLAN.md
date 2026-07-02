@@ -15,13 +15,14 @@ Map the Haltech Platinum Sport 1000 live-data selector IDs to human-readable ECU
 - The live-polling / selector-decoding path is established.
 - A candidate label map exists for a larger slice of selectors.
 - Car-dependent validation is now sidelined until a running car is available.
-- Replay/diff tooling now exists in `haltech_poc.py`.
-- The immediate focus is on protocol documentation and decoder hardening that can be done from captures alone.
+- Replay/diff tooling now exists in `haltech_poc.py` and can consume the real `haltech_usb_capture.pcapng` file.
+- The immediate focus is on protocol documentation, decoder hardening, and capture import/export work that can be done from captures alone.
 
 ## Active workstreams
 
 ### Workstream 1: Car-independent protocol documentation
 - Tighten the frame decoder and describe each known request/response shape.
+- Decode the startup 0x09 tune/page-transfer bursts from the pcapng and document their payload structure.
 - Keep the candidate label map separate from verified labels.
 - Record the observed 0x33 and 0x0B behaviors in the protocol notes.
 

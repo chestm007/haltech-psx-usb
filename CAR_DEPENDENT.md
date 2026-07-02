@@ -9,6 +9,7 @@ This file is the running list of protocol work we are deliberately sidelining be
 - Verify scaling and units for any candidate channel that only has one idle-state sample.
 - Cross-check any low-confidence candidate label against a live capture taken while the engine state changes.
 - Validate whether there are any additional live-data selector groups that only appear in a real vehicle session.
+- Capture the ECU Manager connect sequence in a pcapng file and confirm whether it downloads the whole tune before live polling starts.
 
 ## Notes
 

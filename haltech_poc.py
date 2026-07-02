@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -112,6 +113,7 @@ LIVE_GROUPS: tuple[LiveGroup, ...] = (
 )
 
 LIVE_DATA_GROUPS = {g.req_id: list(g.selectors) for g in LIVE_GROUPS}
+SELECTOR_GROUPS = {g.selectors: g.req_id for g in LIVE_GROUPS}
 
 
 def selector_label(selector_id: int, labels: dict[int, str] | None = None) -> str:
@@ -231,6 +233,54 @@ def parse_capture_tx(hex_data: str) -> tuple[int, tuple[int, ...]]:
     return frame[1], tuple(words_from_bytes(payload))
 
 
+def iter_pcapng_frames(path: str) -> list[bytes]:
+    data = Path(path).read_bytes()
+    frames: list[bytes] = []
+    idx = 0
+    while idx + 12 <= len(data):
+        block_type, block_len = struct.unpack_from("<II", data, idx)
+        if block_len < 12:
+            break
+        if block_type == 0x00000006 and idx + block_len <= len(data):
+            body = data[idx + 8 : idx + block_len - 4]
+            if len(body) >= 20:
+                caplen = struct.unpack_from("<I", body, 12)[0]
+                packet = body[20 : 20 + caplen]
+                if len(packet) >= 64:
+                    frame = packet[64:]
+                    if frame:
+                        frames.append(frame)
+        idx += block_len
+    return frames
+
+
+def iter_capture_events_from_frames(frames: Sequence[bytes], *, source: str = "") -> list[CaptureEvent]:
+    events: list[CaptureEvent] = []
+    current_selectors: dict[int, tuple[int, ...]] = {}
+    expect_values: dict[int, bool] = {}
+    for frame in frames:
+        if len(frame) < 4 or frame[0] != 0x0B:
+            continue
+        req_id = frame[1]
+        payload_len = frame[2]
+        payload = frame[3:-1]
+        if len(payload) != payload_len or payload_len % 2:
+            continue
+        words = tuple(words_from_bytes(payload))
+        if not expect_values.get(req_id, False):
+            current_selectors[req_id] = words
+            expect_values[req_id] = True
+            events.append(CaptureEvent("tx", req_id=req_id, selectors=words, source=source))
+            continue
+        selectors = current_selectors.get(req_id, ())
+        if selectors and len(selectors) == len(words):
+            events.append(CaptureEvent("values", req_id=req_id, selectors=selectors, values=words, source=source))
+        else:
+            events.append(CaptureEvent("values", req_id=req_id, values=words, source=source))
+        expect_values[req_id] = False
+    return events
+
+
 def iter_capture_events(text: str, *, source: str = "") -> list[CaptureEvent]:
     events: list[CaptureEvent] = []
     current_selectors: dict[int, tuple[int, ...]] = {}
@@ -266,7 +316,175 @@ def latest_capture_state(events: Sequence[CaptureEvent]) -> dict[int, CaptureEve
 
 
 def load_capture_events(path: str) -> list[CaptureEvent]:
+    if path.lower().endswith(".pcapng"):
+        return iter_capture_events_from_frames(iter_pcapng_frames(path), source=path)
     return iter_capture_events(Path(path).read_text(), source=path)
+
+
+def summarize_pcapng_packets(path: str) -> list[tuple[int, bytes]]:
+    data = Path(path).read_bytes()
+    packets: list[tuple[int, bytes]] = []
+    idx = 0
+    packet_index = 0
+    while idx + 12 <= len(data):
+        block_type, block_len = struct.unpack_from("<II", data, idx)
+        if block_len < 12:
+            break
+        if block_type == 0x00000006 and idx + block_len <= len(data):
+            body = data[idx + 8 : idx + block_len - 4]
+            if len(body) >= 20:
+                caplen = struct.unpack_from("<I", body, 12)[0]
+                packet = body[20 : 20 + caplen]
+                if len(packet) >= 64:
+                    packets.append((packet_index, packet[64:]))
+                else:
+                    packets.append((packet_index, b""))
+                packet_index += 1
+        idx += block_len
+    return packets
+
+
+def describe_packet_payload(payload: bytes) -> str:
+    if not payload:
+        return "EMPTY"
+    prefix = hx(payload[:16])
+    if len(payload) >= 3:
+        cmd, req, subtype = payload[0], payload[1], payload[2]
+        return f"cmd=0x{cmd:02X} req=0x{req:02X} sub=0x{subtype:02X} len={len(payload)} head={prefix}"
+    return f"len={len(payload)} head={prefix}"
+
+
+def split_len_prefixed_records(body: bytes) -> list[bytes]:
+    records: list[bytes] = []
+    pos = 0
+    while pos < len(body):
+        length = body[pos]
+        if length == 0:
+            pos += 1
+            continue
+        record = body[pos : pos + length]
+        if len(record) != length:
+            raise ValueError(f"truncated record at 0x{pos:04X}: need {length}, got {len(record)}")
+        records.append(record)
+        pos += length
+    return records
+
+
+def summarize_len_prefixed_records(body: bytes) -> str:
+    from collections import Counter
+
+    records = split_len_prefixed_records(body)
+    prefixes = Counter(rec[1:3].hex().upper() for rec in records if len(rec) >= 3)
+    top = " ".join(f"{prefix}({count})" for prefix, count in prefixes.most_common(8))
+    return f"records={len(records)} body_bytes={len(body)} top={top or '(none)'}"
+
+
+def detect_repeating_family_cycles(families: list[str], width: int = 5, limit: int = 3) -> list[tuple[int, int, list[str]]]:
+    best_by_window: dict[tuple[str, ...], tuple[int, int]] = {}
+    for start in range(len(families) - width * 2 + 1):
+        window = tuple(families[start : start + width])
+        if not (window[0].startswith("04") and window[1] == "2401" and window[2] == "2402" and window[3].startswith("05") and window[4] == "2501"):
+            continue
+        count = 0
+        i = start
+        while i + width <= len(families) and tuple(families[i : i + width]) == window:
+            count += 1
+            i += width
+        if count >= 3:
+            prev = best_by_window.get(window)
+            if prev is None or count > prev[0] or (count == prev[0] and start < prev[1]):
+                best_by_window[window] = (count, start)
+    ranked = sorted(((count, start, list(window)) for window, (count, start) in best_by_window.items()), key=lambda item: (-item[0], item[1], item[2]))
+    return ranked[:limit]
+
+
+def summarize_0x09_payload(payload: bytes) -> str:
+    if len(payload) < 10 or payload[0] != 0x09:
+        return ""
+    body = payload[9:]
+    try:
+        records = split_len_prefixed_records(body)
+        families = [f"{rec[1]:02X}{rec[2]:02X}" for rec in records if len(rec) >= 3]
+        summary = summarize_len_prefixed_records(body)
+        cycles = detect_repeating_family_cycles(families, width=5, limit=3)
+        for count, start, window in cycles:
+            summary += f" cycle={' '.join(window)} x{count}@{start}"
+        return summary
+    except Exception as exc:
+        return f"decode_error={exc}"
+
+
+def detect_best_09_cycle(payload: bytes) -> tuple[list[bytes], tuple[int, int, list[str]]] | None:
+    if len(payload) < 10 or payload[0] != 0x09:
+        return None
+    records = split_len_prefixed_records(payload[9:])
+    families = [f"{rec[1]:02X}{rec[2]:02X}" for rec in records if len(rec) >= 3]
+    cycles = detect_repeating_family_cycles(families, width=5, limit=1)
+    if not cycles:
+        return None
+    return records, cycles[0]
+
+
+def format_09_cycle_csv(packet_index: int, payload: bytes) -> str:
+    best = detect_best_09_cycle(payload)
+    if best is None:
+        return ""
+
+    records, (count, start, window) = best
+    rows: list[str] = []
+    rows.append("packet_index,occ,slot,family,length,hex")
+    for occ in range(count):
+        base = start + occ * len(window)
+        for slot, fam in enumerate(window):
+            rec = records[base + slot]
+            rows.append(f"{packet_index},{occ},{slot},{fam},{len(rec):02X},{hx(rec)}")
+    return "\n".join(rows)
+
+
+def format_09_cycle_table(packet_index: int, payload: bytes) -> str:
+    best = detect_best_09_cycle(payload)
+    if best is None:
+        return "(no repeating 0x09 cycle found)"
+
+    records, (count, start, window) = best
+    rows: list[str] = []
+    rows.append(f"packet {packet_index:05d} 0x09 cycle {' '.join(window)} x{count} start={start}")
+    rows.append("| occ | slot | family | len | hex |")
+    rows.append("| --- | --- | --- | ---: | --- |")
+
+    for occ in range(count):
+        base = start + occ * len(window)
+        for slot, fam in enumerate(window):
+            rec = records[base + slot]
+            rows.append(f"| {occ} | {slot} | {fam} | {len(rec):02X} | {hx(rec)} |")
+    return "\n".join(rows)
+
+
+def cmd_inspect_capture(args: argparse.Namespace) -> int:
+    wanted = {parse_int(v) for v in args.cmds} if args.cmds else None
+    packets = summarize_pcapng_packets(args.capture)
+    for packet_index, payload in packets:
+        if not payload:
+            continue
+        cmd = payload[0]
+        if wanted is not None and cmd not in wanted:
+            continue
+        if args.table and cmd == 0x09:
+            if args.packet_index is not None and packet_index != args.packet_index:
+                continue
+            if args.csv:
+                print(format_09_cycle_csv(packet_index, payload))
+            else:
+                print(format_09_cycle_table(packet_index, payload))
+            print()
+            continue
+        line = f"pkt {packet_index:05d} {describe_packet_payload(payload)}"
+        if args.detail and cmd == 0x09:
+            line += f" 09DETAIL {summarize_0x09_payload(payload)}"
+        if args.tail and len(payload) > args.head_bytes:
+            line += f" tail={hx(payload[-args.tail:])}"
+        print(line)
+    return 0
 
 
 def render_capture_event(event: CaptureEvent, labels: dict[int, str] | None = None, *, nonzero_only: bool = False) -> str:
@@ -537,6 +755,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--labels", help="optional JSON file mapping selector ids to channel names")
     s.add_argument("--groups", nargs="*", help="optional subset of live groups, e.g. 0x72 0x73")
     s.set_defaults(func=cmd_diff)
+
+    s = sub.add_parser("inspect-pcapng", help="summarize packets from a pcapng capture")
+    s.add_argument("capture", help="capture file, e.g. haltech_usb_capture.pcapng")
+    s.add_argument("--cmds", nargs="*", help="optional command bytes to filter, e.g. 0x09 0x0B")
+    s.add_argument("--detail", action="store_true", help="decode known nested payload shapes")
+    s.add_argument("--table", action="store_true", help="render repeating 0x09 cycles as a table")
+    s.add_argument("--csv", action="store_true", help="render repeating 0x09 cycles as CSV")
+    s.add_argument("--packet-index", type=int, help="only show a specific packet index")
+    s.add_argument("--head-bytes", type=int, default=16, help="number of leading bytes to display")
+    s.add_argument("--tail", type=int, default=0, help="also show this many trailing bytes")
+    s.set_defaults(func=cmd_inspect_capture)
 
     return p
 
