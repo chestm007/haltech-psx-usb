@@ -15,7 +15,8 @@ Map the Haltech Platinum Sport 1000 live-data selector IDs to human-readable ECU
 - The live-polling / selector-decoding path is established.
 - A candidate label map exists for a larger slice of selectors.
 - Car-dependent validation is now sidelined until a running car is available.
-- The immediate focus is on protocol documentation, decoder hardening, and replay/diff tooling that can be done from captures alone.
+- Replay/diff tooling now exists in `haltech_poc.py`.
+- The immediate focus is on protocol documentation and decoder hardening that can be done from captures alone.
 
 ## Active workstreams
 

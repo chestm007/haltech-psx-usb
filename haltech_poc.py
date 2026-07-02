@@ -6,6 +6,7 @@ What this script does:
 - prints the live-capture 0x0B selector groups
 - can optionally send frames over a serial port if pyserial is installed
 - can run a live polling loop against the ECU on this machine
+- can replay and diff saved capture logs without hardware
 
 Current confidence map:
 - 0x0B = DataRequest (selector table + checksum)
@@ -141,6 +142,21 @@ def format_selector_values(
     return " ".join(parts) if parts else "(all zero)"
 
 
+def format_selector_pairs(
+    selectors: Sequence[int],
+    values: Sequence[int],
+    labels: dict[int, str] | None = None,
+    *,
+    nonzero_only: bool = False,
+) -> str:
+    parts: list[str] = []
+    for selector_id, value in zip(selectors, values, strict=True):
+        if nonzero_only and value == 0:
+            continue
+        parts.append(f"{selector_label(selector_id, labels)}=0x{value:04X}")
+    return " ".join(parts) if parts else "(all zero)"
+
+
 def build_data_request(req_id: int, selector_ids: Sequence[int]) -> bytes:
     selector_bytes = bytes_from_words(selector_ids)
     body = bytes([0x0B, req_id & 0xFF, len(selector_bytes) & 0xFF]) + selector_bytes
@@ -187,6 +203,142 @@ def load_labels(path: str | None) -> dict[int, str]:
             label = str(value)
         labels[parse_int(str(key))] = label
     return labels
+
+
+CAPTURE_TX_RE = re.compile(r"^GROUP 0x(?P<req>[0-9A-F]{2}) TX (?P<hex>[0-9A-F]+)$")
+CAPTURE_VALUES_RE = re.compile(r"^GROUP 0x(?P<req>[0-9A-F]{2}) VALUES (?P<body>.*)$")
+CAPTURE_PAIR_RE = re.compile(r"(?P<label>.+?)=0x(?P<value>[0-9A-Fa-f]{1,4})(?=\s|$)")
+
+
+def parse_capture_values(body: str) -> list[tuple[str, int]]:
+    body = body.strip()
+    if not body or body == "(all zero)":
+        return []
+    pairs: list[tuple[str, int]] = []
+    for match in CAPTURE_PAIR_RE.finditer(body):
+        pairs.append((match.group("label"), int(match.group("value"), 16)))
+    return pairs
+
+
+def parse_capture_tx(hex_data: str) -> tuple[int, tuple[int, ...]]:
+    frame = bytes.fromhex(hex_data)
+    if len(frame) < 4 or frame[0] != 0x0B:
+        raise ValueError("not a data request frame")
+    payload_len = frame[2]
+    payload = frame[3:-1]
+    if payload_len != len(payload):
+        raise ValueError(f"payload length mismatch: header={payload_len} actual={len(payload)}")
+    return frame[1], tuple(words_from_bytes(payload))
+
+
+def iter_capture_events(text: str, *, source: str = "") -> list[CaptureEvent]:
+    events: list[CaptureEvent] = []
+    current_selectors: dict[int, tuple[int, ...]] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = CAPTURE_TX_RE.match(line)
+        if m:
+            req_id, selectors = parse_capture_tx(m.group("hex"))
+            current_selectors[req_id] = selectors
+            events.append(CaptureEvent("tx", req_id=req_id, selectors=selectors, source=source))
+            continue
+        m = CAPTURE_VALUES_RE.match(line)
+        if m:
+            req_id = int(m.group("req"), 16)
+            pairs = parse_capture_values(m.group("body"))
+            values = tuple(value for _, value in pairs)
+            selectors = current_selectors.get(req_id, ())
+            if selectors and len(selectors) == len(values):
+                events.append(CaptureEvent("values", req_id=req_id, selectors=selectors, values=values, source=source))
+            elif values:
+                events.append(CaptureEvent("values", req_id=req_id, values=values, source=source))
+    return events
+
+
+def latest_capture_state(events: Sequence[CaptureEvent]) -> dict[int, CaptureEvent]:
+    latest: dict[int, CaptureEvent] = {}
+    for event in events:
+        if event.kind == "values" and event.values:
+            latest[event.req_id] = event
+    return latest
+
+
+def load_capture_events(path: str) -> list[CaptureEvent]:
+    return iter_capture_events(Path(path).read_text(), source=path)
+
+
+def render_capture_event(event: CaptureEvent, labels: dict[int, str] | None = None, *, nonzero_only: bool = False) -> str:
+    if event.kind == "tx":
+        selectors = " ".join(f"0x{s:04X}" for s in event.selectors)
+        return f"GROUP 0x{event.req_id:02X} SELECTORS {selectors}"
+    if event.selectors:
+        return f"GROUP 0x{event.req_id:02X} VALUES {format_selector_pairs(event.selectors, event.values, labels, nonzero_only=nonzero_only)}"
+    return f"GROUP 0x{event.req_id:02X} VALUES " + " ".join(f"value_{i}=0x{value:04X}" for i, value in enumerate(event.values))
+
+
+def event_value_map(event: CaptureEvent) -> dict[int, int]:
+    return dict(zip(event.selectors, event.values, strict=True)) if event.selectors and event.values else {}
+
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    labels = load_labels(args.labels)
+    wanted = {parse_int(g) for g in args.groups} if args.groups else None
+    for path in args.capture_paths:
+        events = load_capture_events(path)
+        print(f"== {path} ==")
+        for event in events:
+            if wanted and event.req_id not in wanted:
+                continue
+            if event.kind == "tx":
+                print(render_capture_event(event, labels, nonzero_only=args.nonzero_only))
+            elif event.kind == "values":
+                print(render_capture_event(event, labels, nonzero_only=args.nonzero_only))
+        print()
+    return 0
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    labels = load_labels(args.labels)
+    wanted = {parse_int(g) for g in args.groups} if args.groups else None
+    before_state = latest_capture_state(load_capture_events(args.before))
+    after_state = latest_capture_state(load_capture_events(args.after))
+
+    req_ids = sorted(set(before_state) | set(after_state))
+    if wanted is not None:
+        req_ids = [req_id for req_id in req_ids if req_id in wanted]
+
+    for req_id in req_ids:
+        before = before_state.get(req_id)
+        after = after_state.get(req_id)
+        if before is None:
+            print(f"GROUP 0x{req_id:02X} only in after: {render_capture_event(after, labels, nonzero_only=args.nonzero_only)}")
+            continue
+        if after is None:
+            print(f"GROUP 0x{req_id:02X} only in before: {render_capture_event(before, labels, nonzero_only=args.nonzero_only)}")
+            continue
+
+        before_map = event_value_map(before)
+        after_map = event_value_map(after)
+        selectors = list(before.selectors or after.selectors)
+        if not selectors:
+            selectors = sorted(set(before_map) | set(after_map))
+
+        changed: list[str] = []
+        for selector_id in selectors:
+            before_value = before_map.get(selector_id)
+            after_value = after_map.get(selector_id)
+            if before_value == after_value:
+                continue
+            label = selector_label(selector_id, labels)
+            changed.append(f"  {label}: {('n/a' if before_value is None else f'0x{before_value:04X}')} -> {('n/a' if after_value is None else f'0x{after_value:04X}')}")
+
+        if changed:
+            print(f"GROUP 0x{req_id:02X}")
+            for line in changed:
+                print(line)
+    return 0
 
 
 def open_serial(port: str, baud: int):
@@ -371,6 +523,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--nonzero-only", action="store_true", help="hide zero-value channels")
     s.add_argument("--no-status", action="store_true", help="skip the initial 0x33 status probe")
     s.set_defaults(func=cmd_live)
+
+    s = sub.add_parser("replay", help="normalize a saved capture log without hardware")
+    s.add_argument("capture_paths", nargs="+", help="one or more saved live logs")
+    s.add_argument("--labels", help="optional JSON file mapping selector ids to channel names")
+    s.add_argument("--groups", nargs="*", help="optional subset of live groups, e.g. 0x72 0x73")
+    s.add_argument("--nonzero-only", action="store_true", help="hide zero-value channels")
+    s.set_defaults(func=cmd_replay)
+
+    s = sub.add_parser("diff", help="diff two saved capture logs")
+    s.add_argument("before", help="baseline capture log")
+    s.add_argument("after", help="comparison capture log")
+    s.add_argument("--labels", help="optional JSON file mapping selector ids to channel names")
+    s.add_argument("--groups", nargs="*", help="optional subset of live groups, e.g. 0x72 0x73")
+    s.set_defaults(func=cmd_diff)
 
     return p
 
