@@ -1,6 +1,6 @@
 # Haltech Platinum Sport 1000 USB Protocol Notes
 
-Status: static reverse engineering in progress.
+Status: static reverse engineering plus live validation in progress.
 
 ## What is confirmed
 
@@ -36,6 +36,7 @@ Status: static reverse engineering in progress.
   - `0x33 0x77 0xAA` request
   - `0x33 0x77 ...` response carrying status bytes
 - The live trace strongly suggests a request-id based half-duplex exchange: request id increments, payload body changes, and the ECU answers with matching request id plus checksum.
+- `haltech_poc.py` now has a `live` mode that polls the ECU and prints selector/value rows, with an optional JSON label map for correlation work.
 
 ## Live-decoded payload shapes
 
@@ -344,8 +345,33 @@ These are present and likely relevant to the request scheduler, but not all of t
 - `StateMachineFunction`: `RequestState=260`, `ExecuteState=516`, `Reset=772`
 - `StateMachineError`: `None=4`, `UnknownFunction=260`, `UnknownProcess=516`, `Busy=772`, `Danger=1028`, `NotSupported=1284`, `ConnectionError=1540`, `StageMismatch=1796`, `InternalTimeOut=2052`, `IllegalSetStage=2308`
 
+## First-pass channel correlations
+
+These are candidate mappings from live capture plus the ECU Manager string table. They are not yet considered verified, but they are the first selectors that look stable enough to track by name.
+
+| Selector | Candidate label | Evidence |
+|---|---|---|
+| `0x0294` | `Engine Speed.RPM` | Live idle sample read ~840; the exact string exists in the ECU Manager binary. |
+| `0x0295` | `Manifold Pressure` | Live idle sample read ~20.4; the exact string exists in the ECU Manager binary. |
+| `0x0296` | `Throttle Position` | Live idle sample read ~10.7; the exact string exists in the ECU Manager binary. |
+| `0x0443` | `Actual O2 Value Bank 1` | Live sample read a 1.000-style value; the exact string exists in the ECU Manager binary. |
+| `0x0444` | `Actual O2 Value Bank 2` | Live sample read a 1.000-style value; the exact string exists in the ECU Manager binary. |
+| `0x0445` | `Battery Voltage` | Live sample read ~15.0; the exact string exists in the ECU Manager binary. |
+| `0x0080` | `Target - Idle RPM` | Live sample read 8800 (likely 880.0 scaled); the exact string exists in the ECU Manager binary. |
+| `0x0081` | `Ignition Advance` | Live sample read 200 (likely 20.0 scaled); the exact string exists in the ECU Manager binary. |
+| `0x0085` | `Fuel - Target AFR` | Live sample read 1258 (likely 12.58 scaled); the exact string exists in the ECU Manager binary. |
+| `0x0087` | `Injector Duty Cycle` | Live sample read 652 (likely 6.52 scaled); the exact string exists in the ECU Manager binary. |
+| `0x008A` | `Boost Control Output` | Live sample read 40 (likely 4.0 scaled); the exact string exists in the ECU Manager binary. |
+| `0x008C` | `Boost Control Trim` | Live sample read 15 (likely 1.5 scaled); the exact string exists in the ECU Manager binary. |
+| `0x0472` | `Coolant Temperature` | Live sample read 30; the exact string exists in the ECU Manager binary. |
+| `0x0473` | `Oil Temp Sensor 1` | Live sample read 80; the exact string exists in the ECU Manager binary. |
+| `0x0474` | `Fuel Temp Sensor 1` | Live sample read 80; the exact string exists in the ECU Manager binary. |
+| `0x0475` | `Actual Boost Level` | Live sample read 100; the exact string exists in the ECU Manager binary. |
+
 ## Open questions
 
+- The binary string table still contains many plausible gauge/channel labels, but the remaining ones are not yet tied to a specific 0x0B selector.
+- Need a live GUI cross-check to turn candidate names into verified channel labels.
 - Exact frame delimiters and escaping rules still need live capture.
 - The checksum is very likely additive, but I still want a live frame to confirm the wire format.
 - The meaning of the request id and address fields needs normalization across all request classes.

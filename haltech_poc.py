@@ -5,6 +5,7 @@ What this script does:
 - builds the protocol frames we currently understand with confidence
 - prints the live-capture 0x0B selector groups
 - can optionally send frames over a serial port if pyserial is installed
+- can run a live polling loop against the ECU on this machine
 
 Current confidence map:
 - 0x0B = DataRequest (selector table + checksum)
@@ -12,6 +13,7 @@ Current confidence map:
   - GetDTCs / DTC-status probe
   - EEPROMRangesChangedRequest with zeroed range/address fields
 - 0x01 = ECUIDRequest
+- 0x33 = DataLogStatusRequest
 - 0x36 = ECUDescriptorsRequest
 
 This is intentionally conservative: no guessed baud rate, no guessed framing.
@@ -21,8 +23,10 @@ You must supply the serial port and baud rate when you want to talk to hardware.
 from __future__ import annotations
 
 import argparse
-import dataclasses
-import sys
+import json
+import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Sequence
 
 
@@ -65,6 +69,68 @@ def bytes_from_words(words: Iterable[int]) -> bytes:
     return bytes(buf)
 
 
+@dataclass(frozen=True)
+class LiveGroup:
+    req_id: int
+    selectors: tuple[int, ...]
+
+
+LIVE_GROUPS: tuple[LiveGroup, ...] = (
+    LiveGroup(0x72, (
+        0x0080, 0x0081, 0x0084, 0x0085, 0x0087, 0x008A, 0x008B, 0x008C,
+        0x00A4, 0x00E1, 0x00E4, 0x00E5, 0x00E6, 0x00EC, 0x00F2, 0x012F,
+        0x0130, 0x0180, 0x0181, 0x0182, 0x0183, 0x0184, 0x0186, 0x0189,
+        0x018A, 0x018C, 0x0195, 0x0197, 0x01AF, 0x01DF, 0x01E1, 0x01E2,
+    )),
+    LiveGroup(0x73, (
+        0x0201, 0x0202, 0x022B, 0x0240, 0x0241, 0x0242, 0x0280, 0x0281,
+        0x0282, 0x0283, 0x0284, 0x0285, 0x0286, 0x0287, 0x0288, 0x0289,
+        0x0294, 0x0295, 0x0296, 0x02E0, 0x02E1, 0x02E2, 0x02F8, 0x02F9,
+        0x02FA, 0x0442, 0x0443, 0x0444, 0x0445, 0x0446, 0x0447,
+    )),
+    LiveGroup(0x74, (
+        0x0448, 0x0449, 0x044A, 0x044E, 0x044F, 0x0450, 0x0451, 0x0452,
+        0x0453, 0x0472, 0x0473, 0x0474, 0x0475, 0x0476, 0x0477, 0x0478,
+        0x0479, 0x047A, 0x047E, 0x047F, 0x0480, 0x0481, 0x0482, 0x0483,
+        0x04D8, 0x04D9, 0x04DA, 0x04DB, 0x04DC, 0x04DD, 0x04DE, 0x04DF,
+    )),
+    LiveGroup(0x75, (
+        0x04E0, 0x04E4, 0x04E5, 0x04E6, 0x04E7, 0x04E8, 0x04E9,
+        0x054B, 0x054C, 0x054D, 0x05B5, 0x05B6,
+    )),
+)
+
+LIVE_DATA_GROUPS = {g.req_id: list(g.selectors) for g in LIVE_GROUPS}
+
+
+def selector_label(selector_id: int, labels: dict[int, str] | None = None) -> str:
+    if labels and selector_id in labels:
+        return labels[selector_id]
+    return f"selector_0x{selector_id:04X}"
+
+
+def pair_selectors_with_values(selectors: Sequence[int], payload: bytes) -> list[tuple[int, int]]:
+    values = words_from_bytes(payload)
+    if len(values) != len(selectors):
+        raise ValueError(f"selector/value count mismatch: {len(selectors)} selectors vs {len(values)} values")
+    return list(zip(selectors, values))
+
+
+def format_selector_values(
+    selectors: Sequence[int],
+    payload: bytes,
+    labels: dict[int, str] | None = None,
+    *,
+    nonzero_only: bool = False,
+) -> str:
+    parts: list[str] = []
+    for selector_id, value in pair_selectors_with_values(selectors, payload):
+        if nonzero_only and value == 0:
+            continue
+        parts.append(f"{selector_label(selector_id, labels)}=0x{value:04X}")
+    return " ".join(parts) if parts else "(all zero)"
+
+
 def build_data_request(req_id: int, selector_ids: Sequence[int]) -> bytes:
     selector_bytes = bytes_from_words(selector_ids)
     body = bytes([0x0B, req_id & 0xFF, len(selector_bytes) & 0xFF]) + selector_bytes
@@ -76,32 +142,6 @@ def build_simple_request(cmd: int, req_id: int, body_bytes: Sequence[int]) -> by
     return body + bytes([u8_sum(body)])
 
 
-LIVE_DATA_GROUPS = {
-    0x72: [
-        0x0080, 0x0081, 0x0084, 0x0085, 0x0087, 0x008A, 0x008B, 0x008C,
-        0x00A4, 0x00E1, 0x00E4, 0x00E5, 0x00E6, 0x00EC, 0x00F2, 0x012F,
-        0x0130, 0x0180, 0x0181, 0x0182, 0x0183, 0x0184, 0x0186, 0x0189,
-        0x018A, 0x018C, 0x0195, 0x0197, 0x01AF, 0x01DF, 0x01E1, 0x01E2,
-    ],
-    0x73: [
-        0x0201, 0x0202, 0x022B, 0x0240, 0x0241, 0x0242, 0x0280, 0x0281,
-        0x0282, 0x0283, 0x0284, 0x0285, 0x0286, 0x0287, 0x0288, 0x0289,
-        0x0294, 0x0295, 0x0296, 0x02E0, 0x02E1, 0x02E2, 0x02F8, 0x02F9,
-        0x02FA, 0x0442, 0x0443, 0x0444, 0x0445, 0x0446, 0x0447,
-    ],
-    0x74: [
-        0x0448, 0x0449, 0x044A, 0x044E, 0x044F, 0x0450, 0x0451, 0x0452,
-        0x0453, 0x0472, 0x0473, 0x0474, 0x0475, 0x0476, 0x0477, 0x0478,
-        0x0479, 0x047A, 0x047E, 0x047F, 0x0480, 0x0481, 0x0482, 0x0483,
-        0x04D8, 0x04D9, 0x04DA, 0x04DB, 0x04DC, 0x04DD, 0x04DE, 0x04DF,
-    ],
-    0x75: [
-        0x04E0, 0x04E4, 0x04E5, 0x04E6, 0x04E7, 0x04E8, 0x04E9,
-        0x054B, 0x054C, 0x054D, 0x05B5, 0x05B6,
-    ],
-}
-
-
 def print_groups() -> None:
     for req_id, ids in LIVE_DATA_GROUPS.items():
         frame = build_data_request(req_id, ids)
@@ -111,7 +151,6 @@ def print_groups() -> None:
 
 
 def print_examples() -> None:
-    # The two confirmed 0x0C probe shapes from the live trace.
     get_dtc = build_simple_request(0x0C, 0x71, [0x01, 0x03])
     eeprom_ranges_zero = build_simple_request(0x0C, 0x76, [0x06, 0x05, 0x00, 0x00, 0x00, 0x00])
     ecu_id = build_simple_request(0x01, 0x71, [])
@@ -124,19 +163,34 @@ def print_examples() -> None:
     print(f"0x33/DataLogStatusRequest: {hx(data_log_status)}")
 
 
+def load_labels(path: str | None) -> dict[int, str]:
+    if not path:
+        return {}
+    raw = json.loads(Path(path).read_text())
+    labels: dict[int, str] = {}
+    for key, value in raw.items():
+        if isinstance(value, str):
+            label = value
+        elif isinstance(value, dict):
+            label = str(value.get("name") or value.get("label") or value.get("title") or value)
+        else:
+            label = str(value)
+        labels[parse_int(str(key))] = label
+    return labels
+
+
 def open_serial(port: str, baud: int):
     try:
         import serial  # type: ignore
     except Exception as e:  # pragma: no cover
         raise SystemExit(
-            "pyserial is not installed. Install it or use --demo/--hex-only. "
+            "pyserial is not installed. Install it or use --hex-only. "
             f"Import error: {e}"
         )
-    ser = serial.Serial(port=port, baudrate=baud, timeout=1)
-    return ser
+    return serial.Serial(port=port, baudrate=baud, timeout=1)
 
 
-def read_reply(ser, max_bytes: int = 1024) -> bytes:
+def read_reply(ser) -> bytes:
     """Read one length-prefixed frame.
 
     The observed frames use byte 2 as a payload byte count, so the full frame
@@ -169,6 +223,12 @@ def describe_frame(data: bytes) -> str:
     return " ".join(parts)
 
 
+def send_and_receive(ser, frame: bytes) -> bytes:
+    ser.write(frame)
+    ser.flush()
+    return read_reply(ser)
+
+
 def cmd_send(args: argparse.Namespace) -> int:
     if args.kind == "data":
         if args.selectors:
@@ -195,9 +255,7 @@ def cmd_send(args: argparse.Namespace) -> int:
 
     ser = open_serial(args.port, args.baud)
     try:
-        ser.write(frame)
-        ser.flush()
-        reply = read_reply(ser)
+        reply = send_and_receive(ser, frame)
         print(f"RX {hx(reply)}")
         print(f"RXD {describe_frame(reply)}")
     finally:
@@ -228,6 +286,48 @@ def cmd_decode(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_live(args: argparse.Namespace) -> int:
+    labels = load_labels(args.labels)
+    groups = LIVE_GROUPS
+    if args.groups:
+        wanted = {parse_int(g) for g in args.groups}
+        groups = tuple(g for g in LIVE_GROUPS if g.req_id in wanted)
+        missing = wanted - {g.req_id for g in groups}
+        if missing:
+            raise SystemExit(f"unknown live groups: {', '.join(f'0x{x:02X}' for x in sorted(missing))}")
+
+    ser = open_serial(args.port, args.baud)
+    try:
+        if not args.no_status:
+            status_frame = build_simple_request(0x33, args.req_id, [])
+            status_reply = send_and_receive(ser, status_frame)
+            print(f"STATUS TX {hx(status_frame)}")
+            print(f"STATUS RX {hx(status_reply)}")
+            print(f"STATUS RXD {describe_frame(status_reply)}")
+
+        for cycle in range(args.cycles):
+            if cycle:
+                time.sleep(args.delay)
+            print(f"-- cycle {cycle + 1}/{args.cycles} --")
+            for group in groups:
+                frame = build_data_request(args.req_id, group.selectors)
+                reply = send_and_receive(ser, frame)
+                print(f"GROUP 0x{group.req_id:02X} TX {hx(frame)}")
+                print(f"GROUP 0x{group.req_id:02X} RX {hx(reply)}")
+                print(f"GROUP 0x{group.req_id:02X} RXD {describe_frame(reply)}")
+                if len(reply) >= 4 and reply[0] == 0x0B and reply[1] == (args.req_id & 0xFF):
+                    payload = reply[3:-1]
+                    if len(payload) == reply[2]:
+                        print(
+                            f"GROUP 0x{group.req_id:02X} VALUES "
+                            f"{format_selector_values(group.selectors, payload, labels, nonzero_only=args.nonzero_only)}"
+                        )
+                print()
+    finally:
+        ser.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Haltech ECU protocol POC")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -249,6 +349,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--selectors", nargs="*", help="selector IDs for data requests, e.g. 0x80 0x81 ...")
     s.add_argument("--hex-data", help="hex payload for raw mode")
     s.set_defaults(func=cmd_send)
+
+    s = sub.add_parser("live", help="poll the ECU and print decoded live values")
+    s.add_argument("--port", default="/dev/ttyUSB0", help="serial port (default: /dev/ttyUSB0)")
+    s.add_argument("--baud", type=int, default=57600, help="baud rate (default: 57600)")
+    s.add_argument("--req-id", type=lambda s: int(s, 0), default=0x77, help="request id byte")
+    s.add_argument("--cycles", type=int, default=1, help="poll cycles to run")
+    s.add_argument("--delay", type=float, default=0.2, help="delay between cycles in seconds")
+    s.add_argument("--groups", nargs="*", help="optional subset of live groups, e.g. 0x72 0x73")
+    s.add_argument("--labels", help="optional JSON file mapping selector ids to channel names")
+    s.add_argument("--nonzero-only", action="store_true", help="hide zero-value channels")
+    s.add_argument("--no-status", action="store_true", help="skip the initial 0x33 status probe")
+    s.set_defaults(func=cmd_live)
 
     return p
 
