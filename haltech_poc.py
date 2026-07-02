@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,6 +74,15 @@ def bytes_from_words(words: Iterable[int]) -> bytes:
 class LiveGroup:
     req_id: int
     selectors: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class CaptureEvent:
+    kind: str
+    req_id: int
+    selectors: tuple[int, ...] = ()
+    values: tuple[int, ...] = ()
+    source: str = ""
 
 
 LIVE_GROUPS: tuple[LiveGroup, ...] = (

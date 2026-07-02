@@ -1,0 +1,82 @@
+{
+  "0x0294": {
+    "name": "Engine Speed.RPM",
+    "confidence": "high",
+    "note": "Live idle sample read ~840 and the exact string exists in the ECU Manager binary."
+  },
+  "0x0295": {
+    "name": "Manifold Pressure",
+    "confidence": "high",
+    "note": "Live idle sample read ~20.4 and the exact string exists in the ECU Manager binary."
+  },
+  "0x0296": {
+    "name": "Throttle Position",
+    "confidence": "high",
+    "note": "Live idle sample read ~10.7 and the exact string exists in the ECU Manager binary."
+  },
+  "0x0443": {
+    "name": "Actual O2 Value Bank 1",
+    "confidence": "medium",
+    "note": "Live sample read 1.000-style value; exact string exists in the ECU Manager binary."
+  },
+  "0x0444": {
+    "name": "Actual O2 Value Bank 2",
+    "confidence": "medium",
+    "note": "Live sample read 1.000-style value; exact string exists in the ECU Manager binary."
+  },
+  "0x0445": {
+    "name": "Battery Voltage",
+    "confidence": "medium",
+    "note": "Live sample read ~15.0; exact string exists in the ECU Manager binary."
+  },
+  "0x0080": {
+    "name": "Target - Idle RPM",
+    "confidence": "low",
+    "note": "Live sample read 8800 (likely 880.0 scaled); exact string exists in the ECU Manager binary."
+  },
+  "0x0081": {
+    "name": "Ignition Advance",
+    "confidence": "low",
+    "note": "Live sample read 200 (likely 20.0 scaled); exact string exists in the ECU Manager binary."
+  },
+  "0x0085": {
+    "name": "Fuel - Target AFR",
+    "confidence": "low",
+    "note": "Live sample read 1258 (likely 12.58 scaled); exact string exists in the ECU Manager binary."
+  },
+  "0x0087": {
+    "name": "Injector Duty Cycle",
+    "confidence": "low",
+    "note": "Live sample read 652 (likely 6.52 scaled); exact string exists in the ECU Manager binary."
+  },
+  "0x008A": {
+    "name": "Boost Control Output",
+    "confidence": "low",
+    "note": "Live sample read 40 (likely 4.0 scaled); exact string exists in the ECU Manager binary."
+  },
+  "0x008C": {
+    "name": "Boost Control Trim",
+    "confidence": "low",
+    "note": "Live sample read 15 (likely 1.5 scaled); exact string exists in the ECU Manager binary."
+  },
+  "0x0472": {
+    "name": "Coolant Temperature",
+    "confidence": "low",
+    "note": "Live sample read 30; exact string exists in the ECU Manager binary."
+  },
+  "0x0473": {
+    "name": "Oil Temp Sensor 1",
+    "confidence": "low",
+    "note": "Live sample read 80; exact string exists in the ECU Manager binary."
+  },
+  "0x0474": {
+    "name": "Fuel Temp Sensor 1",
+    "confidence": "low",
+    "note": "Live sample read 80; exact string exists in the ECU Manager binary."
+  },
+  "0x0475": {
+    "name": "Actual Boost Level",
+    "confidence": "low",
+    "note": "Live sample read 100; exact string exists in the ECU Manager binary."
+  }
+}

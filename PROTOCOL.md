@@ -1,6 +1,7 @@
 # Haltech Platinum Sport 1000 USB Protocol Notes
 
 Status: static reverse engineering plus live validation in progress.
+Anything that needs a running car or ECU Manager GUI cross-check belongs in `CAR_DEPENDENT.md`.
 
 ## What is confirmed
 
@@ -23,20 +24,12 @@ Status: static reverse engineering plus live validation in progress.
 - `ProcessSyncBytes()` treats `0xFF` specially.
 - `WriteSyncBytes()` emits an 8-byte sync block.
 - Many response validators use an 8-bit additive checksum: last byte equals the sum of earlier bytes modulo 256.
-- Serial baud is now confirmed live at `57600` on this setup.
+- Serial baud is confirmed live at `57600` on this setup.
 - Live USB capture on the host shows the CP210x bridge at bus 3, device address 4 while ECU Manager talks to the ECU.
 - On connect, ECU Manager immediately starts a burst of proprietary `0x0B`/`0x0C` request frames, then settles into a repeating poll/download pattern.
 - In the live capture, the dominant application bytes are `0x0B` (by far the most common), then `0x0C`, then `0x33`; `0xFF`-only transfers also appear frequently as control/empty/status traffic.
-- The first observed real application frames after attach included:
-  - `0x0B 0x70 0x18 ... 0x93` (30-byte IN transfer)
-  - `0x0C 0x71 0x01 0x03 0x81` (5-byte OUT transfer)
-  - `0x0C 0x71 0x02 0x03 0xFE 0x80 0xFF 0xFF` (8-byte IN transfer)
 - The startup/download phase contains repeated `0x0B 0x72`/`0x0B 0x73`/`0x0B 0x74`/`0x0B 0x75` style frames carrying large selector tables and ECU data blocks, with responses mirroring the request id in the second byte.
-- `0x33` traffic appears during startup as well:
-  - `0x33 0x77 0xAA` request
-  - `0x33 0x77 ...` response carrying status bytes
-- The live trace strongly suggests a request-id based half-duplex exchange: request id increments, payload body changes, and the ECU answers with matching request id plus checksum.
-- `haltech_poc.py` now has a `live` mode that polls the ECU and prints selector/value rows, with an optional JSON label map for correlation work.
+- `haltech_poc.py` has a `live` mode that polls the ECU and prints selector/value rows, with an optional JSON label map for correlation work.
 
 ## Live-decoded payload shapes
 
@@ -80,7 +73,7 @@ Representative request groups from the capture:
 - `0B 74 40 ...`
   - 32 selectors
   - ids: `0448 0449 044A 044E 044F 0450 0451 0452 0453 0472 0473 0474 0475 0476 0477 0478 0479 047A 047E 047F 0480 0481 0482 0483 04D8 04D9 04DA 04DB 04DC 04DD 04DE 04DF`
-  - live response shows mostly zeros with three non-zero values: `001E 0050 0050 0064`
+  - live response shows mostly zeros with four non-zero values: `001E 0050 0050 0064`
 
 - `0B 75 18 ...`
   - 12 selectors
@@ -101,7 +94,6 @@ Two short forms are confirmed in the trace:
   - response: `0C <req> 02 05 FE <checksum> FF FF`
   - this matches `EEPROMRangesChangedRequest` when its range/address fields are zeroed
 
-
 ## Command IDs confirmed from request constructors
 
 | Class | Command ID |
@@ -114,14 +106,8 @@ Two short forms are confirmed in the trace:
 | `DataPageRequest` | `0x06` |
 | `ResetRequest` | `0x07` |
 | `DataRequest` | `0x0B` |
-| `EraseDTCs` | `0x0C` |
-| `GetDeviceInfo` | `0x0C` |
-| `GetDTCs` | `0x0C` |
-| `ChipDescriptorsRequest` | `0x0C` |
-| `SetPassword` | `0x0C` |
-| `CheckPasswordKey` | `0x0C` |
+| `0x0C family` (DTC / device-info / password / chip-descriptor requests) | `0x0C` |
 | `BlackListEnable` | `0x42` |
-| `FirmwareErase` | `0x20` |
 | `IsFirmwareErased` | `0x21` |
 | `FirmwareWrite` | `0x23` |
 | `DataLogStatusRequest` | `0x33` |
@@ -133,7 +119,6 @@ Two short forms are confirmed in the trace:
 | `RebootToBootcode` | `0x39` |
 | `GetConsoleMessage` | `0x40` |
 | `SendConsoleMessage` | `0x41` |
-| `BlackListEnable` | `0x42` |
 
 ## Request / response shapes recovered so far
 
