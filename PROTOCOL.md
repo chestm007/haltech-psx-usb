@@ -379,9 +379,23 @@ These are candidate mappings from live capture plus the ECU Manager string table
 | `0x0472` | `Coolant Temperature` | Live sample read 30; the exact string exists in the ECU Manager binary. |
 | `0x0473` | `Oil Temp Sensor 1` | Live sample read 80; the exact string exists in the ECU Manager binary. |
 | `0x0474` | `Fuel Temp Sensor 1` | Live sample read 80; the exact string exists in the ECU Manager binary. |
-| `0x0475` | `Actual Boost Level` | Live sample read 100; the exact string exists in the ECU Manager binary. |
+|| `0x0475` | `Actual Boost Level` | Live sample read 100; the exact string exists in the ECU Manager binary. |
 
-## Open questions
+## Wire selector → internal channel mapping
+
+The wire selector IDs (used in 0x0B live data polling) are NOT the same as the internal channel IDs (used in 0x09 tune transfer and ECU Manager internals). The mapping between them is a complex lookup table maintained by ECU Manager.
+
+Key findings from offset analysis:
+
+- Wire selectors map to internal channel IDs in groups with consistent offsets
+- Group 1: 0x0080-0x00FF → Internal 0x0000-0x007F (offset 0x0080)
+- Group 2: 0x0294-0x0296 → Internal 0x0004-0x0006 (offset 0x0290)
+- Group 3: 0x0442-0x0447 → Internal 0x0102-0x0107 (offset 0x0340)
+- Group 4: 0x0472-0x0475 → Internal 0x0102-0x0105 (offset 0x0370)
+
+The mapping is NOT a simple offset — different groups of wire selectors map to different ranges of internal channel IDs. The 0x09 tune transfer protocol encodes this mapping in the `row_index` and `row_meta` fields.
+
+See `WIRE_SELECTOR_MAPPING.md` for the full analysis.
 
 - The binary string table still contains many plausible gauge/channel labels, but the remaining ones are not yet tied to a specific 0x0B selector.
 - Need a live GUI cross-check to turn candidate names into verified channel labels.
